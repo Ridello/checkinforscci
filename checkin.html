@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Event Check-In — SCCI</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@500&display=swap');
+:root { --bg:#050505; --surface:#0e0e10; --surface-2:#16161a; --text:#fff; --text-soft:#b8b8b8; --text-dim:#7a7a7f;
+  --blue:#3b82f6; --violet:#7c3aed; --red:#c81e2b; --green:#22c55e; --amber:#f59e0b; --border:rgba(255,255,255,.1); }
+* { box-sizing: border-box; }
+body { margin:0; min-height:100vh; background:var(--bg); color:var(--text); font-family:'Inter',sans-serif; }
+h1,h2 { font-family:'Space Grotesk',sans-serif; margin:0; }
+.wrap { max-width: 520px; margin: 0 auto; padding: 24px 18px 80px; }
+.glass { background: linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,.015)); border:1px solid var(--border); border-radius:18px; padding:22px; backdrop-filter: blur(16px); margin-bottom:18px; }
+#login { max-width:380px; margin:80px auto; }
+input { width:100%; padding:12px 14px; background:var(--surface); border:1px solid var(--border); border-radius:10px; color:var(--text); font-size:14px; margin-top:6px; }
+.btn { display:inline-flex; align-items:center; justify-content:center; gap:8px; padding:12px 20px; border-radius:12px; border:none; cursor:pointer; font-size:14px; font-weight:600; width:100%; margin-top:14px; background:linear-gradient(135deg,var(--blue),var(--violet)); color:#fff; }
+.btn-ghost { background:var(--surface-2); color:var(--text); border:1px solid var(--border); }
+video, canvas#overlay { width:100%; border-radius:14px; background:#000; }
+.scan-box { position:relative; }
+.totals { display:flex; gap:10px; margin-bottom:16px; }
+.totals .pill { flex:1; text-align:center; background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:12px; }
+.totals .pill .n { font-size:22px; font-weight:700; font-family:'Space Grotesk'; }
+.totals .pill .l { font-size:11px; color:var(--text-dim); margin-top:2px; }
+.result { padding:16px; border-radius:14px; margin-top:14px; text-align:center; }
+.result.ok { background:rgba(34,197,94,.12); border:1px solid rgba(34,197,94,.3); }
+.result.warn { background:rgba(245,158,11,.12); border:1px solid rgba(245,158,11,.3); }
+.result.err { background:rgba(200,30,43,.12); border:1px solid rgba(200,30,43,.3); }
+.result .name { font-size:18px; font-weight:700; margin:6px 0; }
+.mono { font-family:'IBM Plex Mono',monospace; }
+.hint { font-size:12px; color:var(--text-dim); }
+.manual-row { display:flex; gap:8px; }
+.manual-row input { flex:1; margin-top:0; }
+.manual-row button { width:auto; margin-top:0; padding:12px 18px; }
+</style>
+</head>
+<body>
+
+<div id="login">
+  <div class="glass">
+    <h2 style="margin-bottom:16px;">Organizer check-in</h2>
+    <label class="hint">Email</label>
+    <input type="email" id="loginEmail" />
+    <label class="hint" style="margin-top:10px;display:block;">Password</label>
+    <input type="password" id="loginPassword" />
+    <button class="btn" id="loginBtn">Sign in</button>
+    <div class="hint" id="loginMsg" style="margin-top:10px;"></div>
+  </div>
+</div>
+
+<div class="wrap" id="app" style="display:none">
+  <h1 style="margin-bottom:16px;">Check-in</h1>
+
+  <div class="totals">
+    <div class="pill"><div class="n" id="totalChecked">—</div><div class="l">Checked in</div></div>
+    <div class="pill"><div class="n" id="totalRegistered">—</div><div class="l">Total registered</div></div>
+    <button class="btn-ghost" style="width:auto; padding:0 14px; border-radius:12px;" id="refreshTotals">↻</button>
+  </div>
+
+  <div class="glass">
+    <div class="scan-box">
+      <video id="video" playsinline></video>
+    </div>
+    <p class="hint" style="margin-top:10px;" id="camStatus">Point the camera at a participant's QR code.</p>
+    <button class="btn btn-ghost" id="toggleCam">Start camera</button>
+  </div>
+
+  <div class="glass">
+    <p class="hint" style="margin-bottom:8px;">Or check in manually by reference code</p>
+    <div class="manual-row">
+      <input type="text" id="manualRef" placeholder="SCCI-2026-00001" />
+      <button class="btn" id="manualBtn" style="background:linear-gradient(135deg,var(--blue),var(--violet));color:#fff;">Check in</button>
+    </div>
+  </div>
+
+  <div id="resultBox"></div>
+</div>
+
+<script>
+const SUPABASE_URL = "https://qnasjflifrdllwicrfdg.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_VixtRQE67H9okiiBWwCsNg_FEQzuPAv";
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+// Set this to the real event id once you've confirmed it (used only for totals).
+const EVENT_SLUG = "october-competition-2026";
+
+document.getElementById('loginBtn').addEventListener('click', async () => {
+  const email = document.getElementById('loginEmail').value.trim();
+  const password = document.getElementById('loginPassword').value;
+  const msg = document.getElementById('loginMsg');
+  msg.textContent = 'Signing in...';
+  const { error } = await sb.auth.signInWithPassword({ email, password });
+  if (error) { msg.textContent = error.message; return; }
+  document.getElementById('login').style.display = 'none';
+  document.getElementById('app').style.display = 'block';
+  refreshTotals();
+});
+
+sb.auth.onAuthStateChange((event, session) => {
+  if (session) {
+    document.getElementById('login').style.display = 'none';
+    document.getElementById('app').style.display = 'block';
+    refreshTotals();
+  }
+});
+
+async function refreshTotals() {
+  const { data: ev } = await sb.from('events').select('id').eq('slug', EVENT_SLUG).single();
+  if (!ev) return;
+  const { count: total } = await sb.from('event_registrations').select('id', { count: 'exact', head: true }).eq('event_id', ev.id);
+  const { count: checked } = await sb.from('event_registrations').select('id', { count: 'exact', head: true }).eq('event_id', ev.id).not('checked_in_at', 'is', null);
+  document.getElementById('totalRegistered').textContent = total ?? '—';
+  document.getElementById('totalChecked').textContent = checked ?? '—';
+}
+document.getElementById('refreshTotals').addEventListener('click', refreshTotals);
+
+function renderResult(kind, title, reg) {
+  const box = document.getElementById('resultBox');
+  const cls = kind === 'checked_in' ? 'ok' : kind === 'already_checked_in' ? 'warn' : kind === 'payment_pending' ? 'warn' : 'err';
+  box.innerHTML = `<div class="result ${cls}">
+    <p class="hint">${title}</p>
+    ${reg ? `<div class="name">${reg.full_name || ''}</div>
+    <p class="mono">${reg.reference_code || ''}</p>
+    <p class="hint">${reg.participant_type || ''} · ${reg.school_name || ''}</p>` : ''}
+  </div>`;
+}
+
+async function doCheckIn({ registrationId, referenceCode }) {
+  const { data, error } = await sb.rpc('check_in_participant', {
+    p_registration_id: registrationId || null,
+    p_reference_code: referenceCode || null,
+  });
+  if (error) { renderResult('err', error.message); return; }
+  const row = Array.isArray(data) ? data[0] : data;
+  const titles = {
+    checked_in: '✓ Checked in successfully',
+    already_checked_in: 'Already checked in earlier',
+    payment_pending: 'Payment still pending — confirm before entry',
+    not_found: 'No registration found for this code',
+  };
+  renderResult(row.result, titles[row.result] || row.result, row);
+  if (row.result === 'checked_in') refreshTotals();
+}
+
+document.getElementById('manualBtn').addEventListener('click', () => {
+  const ref = document.getElementById('manualRef').value.trim();
+  if (!ref) return;
+  doCheckIn({ referenceCode: ref });
+  document.getElementById('manualRef').value = '';
+});
+
+// ---------- Camera scanning ----------
+let stream = null, scanning = false;
+const video = document.getElementById('video');
+const canvas = document.createElement('canvas');
+const ctx = canvas.getContext('2d');
+
+document.getElementById('toggleCam').addEventListener('click', async () => {
+  if (scanning) { stopCam(); return; }
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+    video.srcObject = stream;
+    await video.play();
+    scanning = true;
+    document.getElementById('toggleCam').textContent = 'Stop camera';
+    document.getElementById('camStatus').textContent = 'Scanning...';
+    requestAnimationFrame(tick);
+  } catch (err) {
+    document.getElementById('camStatus').textContent = 'Camera unavailable — use manual entry below.';
+  }
+});
+
+function stopCam() {
+  scanning = false;
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  document.getElementById('toggleCam').textContent = 'Start camera';
+  document.getElementById('camStatus').textContent = 'Camera stopped.';
+}
+
+let lastScan = 0;
+function tick() {
+  if (!scanning) return;
+  if (video.readyState === video.HAVE_ENOUGH_DATA) {
+    canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const code = jsQR(img.data, img.width, img.height);
+    if (code && Date.now() - lastScan > 2500) {
+      lastScan = Date.now();
+      // QR payload is the opaque qr_token (uuid) — resolve via lookup, then check in.
+      resolveAndCheckIn(code.data.trim());
+    }
+  }
+  requestAnimationFrame(tick);
+}
+
+async function resolveAndCheckIn(qrToken) {
+  document.getElementById('camStatus').textContent = 'Code detected — checking in...';
+  const { data, error } = await sb.rpc('lookup_registration_by_qr', { p_qr_token: qrToken });
+  if (error || !data || !data.length) {
+    renderResult('not_found', 'QR code not recognized', null);
+    document.getElementById('camStatus').textContent = 'Scanning...';
+    return;
+  }
+  const match = Array.isArray(data) ? data[0] : data;
+  await doCheckIn({ registrationId: match.registration_id });
+  document.getElementById('camStatus').textContent = 'Scanning...';
+}
+</script>
+</body>
+</html>
